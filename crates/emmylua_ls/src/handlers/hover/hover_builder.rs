@@ -107,7 +107,7 @@ impl<'a> HoverBuilder<'a> {
         }
     }
 
-    pub fn get_call_signature(&mut self) -> Option<LuaFunctionType> {
+    pub fn get_call_function(&mut self) -> Option<LuaFunctionType> {
         if self.is_completion {
             return None;
         }
@@ -117,7 +117,9 @@ impl<'a> HoverBuilder<'a> {
                 match call_expr.kind().into() {
                     LuaSyntaxKind::CallExpr => {
                         let call_expr = LuaCallExpr::cast(call_expr)?;
-                        let func = self.semantic_model.infer_call_expr_func(call_expr.clone(), None);
+                        let func = self
+                            .semantic_model
+                            .infer_call_expr_func(call_expr.clone(), None);
                         if let Some(func) = func {
                             // 确定参数量是否与当前输入的参数数量一致, 因为`infer_call_expr_func`必然返回一个有效的类型, 即使不是完全匹配的
                             let call_expr_args_count = call_expr.get_args_count();
@@ -133,7 +135,6 @@ impl<'a> HoverBuilder<'a> {
                 }
             }
         }
-
         None
     }
 

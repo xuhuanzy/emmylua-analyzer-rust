@@ -126,6 +126,16 @@ impl LuaMemberIndex {
     ) -> Option<&HashMap<LuaMemberKey, OneOrMulti>> {
         self.owner_members.get(&owner)
     }
+
+    pub fn get_member_by_key(&self, owner: LuaMemberOwner, key: LuaMemberKey) -> Option<OneOrMulti> {
+        let map = self.get_member_map(owner)?;
+        for (cur_key, value) in map.iter() {
+            if cur_key == &key {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
 }
 
 impl LuaIndex for LuaMemberIndex {

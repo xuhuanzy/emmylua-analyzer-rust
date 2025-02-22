@@ -1,9 +1,10 @@
 use emmylua_code_analysis::{
     DbIndex, LuaFunctionType, LuaMember, LuaMemberKey, LuaMemberOwner, LuaPropertyOwnerId,
-    LuaSignature, LuaSignatureId, LuaType, RenderLevel,
+    LuaSignature, LuaSignatureId, LuaType, OneOrMulti, RenderLevel,
 };
 
 use emmylua_code_analysis::humanize_type;
+use itertools::Itertools;
 
 use super::hover_builder::HoverBuilder;
 
@@ -29,12 +30,9 @@ pub fn hover_function_type(
 ) {
     match typ {
         LuaType::Function => builder.set_type_description(format!("function {}()", func_name)),
-        LuaType::DocFunction(lua_func) => builder.set_type_description(hover_doc_function_type(
-            db,
-            &lua_func,
-            function_member,
-            func_name,
-        )),
+        LuaType::DocFunction(lua_func) => {
+            hover_doc_function_type(builder, db, &lua_func, function_member, func_name);
+        }
         LuaType::Signature(signature_id) => hover_signature_type(
             builder,
             db,
@@ -50,23 +48,78 @@ pub fn hover_function_type(
     }
 }
 
-#[allow(unused)]
 fn hover_doc_function_type(
+    builder: &mut HoverBuilder,
+    db: &DbIndex,
+    lua_func: &LuaFunctionType,
+    function_member: Option<&LuaMember>,
+    func_name: &str,
+) {
+    if let Some(owner_member) = function_member {
+        let member_one = db
+            .get_member_index()
+            .get_member_by_key(owner_member.get_owner(), owner_member.get_key().clone());
+
+        if let Some(OneOrMulti::Multi(ids)) = member_one.and_then(|m| Some(m)) {
+            let mut docfunctions = Vec::new();
+            for id in ids.iter() {
+                if let Some(member) = db.get_member_index().get_member(id) {
+                    if let LuaType::DocFunction(overload_fun) = member.get_decl_type() {
+                        docfunctions.push((overload_fun.as_ref().clone(), member));
+                    }
+                }
+            }
+
+            if let Some(call_function) = builder.get_call_function() {
+                for (func, member) in &docfunctions {
+                    if *func == call_function {
+                        let result =
+                            build_doc_function_type(db, &call_function, Some(member), func_name);
+                        builder.set_type_description(result);
+                        return; // 此时只需要显示完全匹配的签名
+                    }
+                }
+            }
+            // 需要过滤掉重复的
+            let mut overloads = Vec::new();
+            for (func, member) in &docfunctions {
+                overloads.push(build_doc_function_type(db, func, Some(member), func_name));
+            }
+            overloads = overloads.into_iter().unique().collect();
+            for (i, overload) in overloads.iter().enumerate() {
+                if i == 0 {
+                    builder.set_type_description(overload.clone());
+                } else {
+                    builder.add_signature_overload(overload.clone());
+                }
+            }
+            return;
+        }
+    }
+    builder.set_type_description(build_doc_function_type(
+        db,
+        lua_func,
+        function_member,
+        func_name,
+    ));
+}
+
+fn build_doc_function_type(
     db: &DbIndex,
     lua_func: &LuaFunctionType,
     owner_member: Option<&LuaMember>,
     func_name: &str,
 ) -> String {
-    let async_prev = if lua_func.is_async() { "async " } else { "" };
-    let mut type_prev = "function ";
+    let async_label = if lua_func.is_async() { "async " } else { "" };
+    let mut type_label = "function ";
     // 有可能来源于类. 例如: `local add = class.add`, `add()`应被视为类方法
-    let full_func_name = if let Some(owner_member) = owner_member {
+    let full_name = if let Some(owner_member) = owner_member {
         let mut name = String::new();
         let parent_owner = owner_member.get_owner();
-        if let LuaMemberOwner::Type(ty) = &parent_owner {
+        if let LuaMemberOwner::Type(ty) = &parent_owner.clone() {
             name.push_str(ty.get_simple_name());
             if owner_member.is_field().is_some() {
-                type_prev = "(field) ";
+                type_label = "(field) ";
             }
         }
         match owner_member.get_decl_type() {
@@ -79,7 +132,7 @@ fn hover_doc_function_type(
                         })
                     }) == Some(true)
                 {
-                    type_prev = "(method) ";
+                    type_label = "(method) ";
                     name.push_str(":");
                 } else {
                     name.push_str(".");
@@ -117,34 +170,21 @@ fn hover_doc_function_type(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let rets = lua_func.get_ret();
-
-    let mut result = String::new();
-    result.push_str(type_prev);
-    result.push_str(async_prev);
-    result.push_str(&full_func_name);
-    result.push_str("(");
-    result.push_str(params.as_str());
-    result.push_str(")");
-
-    if !rets.is_empty() {
-        result.push_str(" -> ");
-        if rets.len() > 1 {
-            result.push_str("(");
+    let rets = {
+        let rets = lua_func.get_ret();
+        if rets.is_empty() {
+            "".to_string()
+        } else {
+            format!(
+                " -> {}",
+                rets.iter()
+                    .map(|ty| humanize_type(db, ty, RenderLevel::Simple))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         }
-        result.push_str(
-            &rets
-                .iter()
-                .map(|ty| humanize_type(db, ty, RenderLevel::Normal))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        if rets.len() > 1 {
-            result.push_str(")");
-        }
-    }
-
-    result
+    };
+    format_function_type(type_label, async_label, full_name, params, rets)
 }
 
 fn hover_signature_type(
@@ -198,24 +238,13 @@ fn hover_signature_type(
             .collect::<Vec<_>>()
             .join(", ");
         let rets = get_signature_rets_string(db, signature, builder.is_completion, None);
-        let mut result = String::new();
-        if type_label.starts_with("function") {
-            result.push_str(async_label);
-            result.push_str(type_label);
-        } else {
-            result.push_str(type_label);
-            result.push_str(async_label);
-        }
-        result.push_str(&full_name);
-        result.push_str("(");
-        result.push_str(params.as_str());
-        result.push_str(")");
-        result.push_str(rets.as_str());
-        result
+        // 构建签名
+        format_function_type(type_label, async_label, full_name.clone(), params, rets)
     };
     // 构建所有重载
     let overloads: Vec<String> = {
-        let call_signature = builder.get_call_signature();
+        let call_function = builder.get_call_function();
+        dbg!(&call_function);
         let mut overloads = Vec::new();
         for (_, overload) in signature.overloads.iter().enumerate() {
             let async_label = if overload.is_async() { "async " } else { "" };
@@ -235,22 +264,11 @@ fn hover_signature_type(
             let rets =
                 get_signature_rets_string(db, signature, builder.is_completion, Some(overload));
 
-            let mut result = String::new();
-            if type_label.starts_with("function") {
-                result.push_str(async_label);
-                result.push_str(type_label);
-            } else {
-                result.push_str(type_label);
-                result.push_str(async_label);
-            }
-            result.push_str(&full_name);
-            result.push_str("(");
-            result.push_str(params.as_str());
-            result.push_str(")");
-            result.push_str(rets.as_str());
+            let result =
+                format_function_type(type_label, async_label, full_name.clone(), params, rets);
 
-            if let Some(call_signature) = &call_signature {
-                if *call_signature == **overload {
+            if let Some(call_function) = &call_function {
+                if *call_function == **overload {
                     // 如果具有完全匹配的签名, 那么将其设置为当前签名, 且不显示重载
                     builder.set_type_description(result);
                     builder.signature_overload = None;
@@ -298,13 +316,17 @@ fn get_signature_rets_string(
             overload_rets_string
         } else {
             let rets = &signature.return_docs;
-            format!(
-                " -> {}",
-                rets.iter()
-                    .map(|ret| humanize_type(db, &ret.type_ref, RenderLevel::Simple))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            if rets.is_empty() {
+                "".to_string()
+            } else {
+                format!(
+                    " -> {}",
+                    rets.iter()
+                        .map(|ret| humanize_type(db, &ret.type_ref, RenderLevel::Simple))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
         };
         result.push_str(rets.as_str());
     } else {
@@ -350,4 +372,19 @@ fn get_signature_rets_string(
         result.push_str(rets.as_str());
     };
     result
+}
+
+fn format_function_type(
+    type_label: &str,
+    async_label: &str,
+    full_name: String,
+    params: String,
+    rets: String,
+) -> String {
+    let prefix = if type_label.starts_with("function") {
+        format!("{}{}", async_label, type_label)
+    } else {
+        format!("{}{}", type_label, async_label)
+    };
+    format!("{}{}({}){}", prefix, full_name, params, rets)
 }

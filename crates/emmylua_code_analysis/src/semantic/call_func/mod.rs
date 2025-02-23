@@ -1,15 +1,17 @@
+use core::alloc;
 use std::sync::Arc;
 
-use emmylua_parser::LuaCallExpr;
+use emmylua_parser::{LuaAstNode, LuaCallExpr};
 
 use crate::{
-    DbIndex, LuaFunctionType, LuaGenericType, LuaOperatorMetaMethod, LuaSignatureId, LuaType,
-    LuaTypeDeclId,
+    semantic::semantic_info::{infer_expr_property_owner, OwnerGuard},
+    DbIndex, LuaFunctionType, LuaGenericType, LuaOperatorMetaMethod, LuaPropertyOwnerId,
+    LuaSignatureId, LuaType, LuaTypeDeclId, OneOrMulti,
 };
 
 use super::{
     instantiate::{instantiate_func_generic, TypeSubstitutor},
-    instantiate_type, resolve_signature, InferGuard, LuaInferConfig,
+    instantiate_type, resolve_signature, InferGuard, LuaInferConfig, SemanticModel,
 };
 
 pub fn infer_call_expr_func(
@@ -21,7 +23,13 @@ pub fn infer_call_expr_func(
     args_count: Option<usize>,
 ) -> Option<Arc<LuaFunctionType>> {
     match call_expr_type {
-        LuaType::DocFunction(func) => Some(func),
+        LuaType::DocFunction(func) => {
+            let matched_func = infer_doc_function(db, config, func.clone(), call_expr, args_count);
+            if let Some(matched_func) = matched_func {
+                return Some(matched_func);
+            }
+            Some(func)
+        }
         LuaType::Signature(signature_id) => infer_signature_doc_function(
             db,
             config,
@@ -57,6 +65,55 @@ pub fn infer_call_expr_func(
     }
 }
 
+#[allow(unused)]
+fn infer_doc_function(
+    db: &DbIndex,
+    config: &mut LuaInferConfig,
+    func: Arc<LuaFunctionType>,
+    call_expr: LuaCallExpr,
+    args_count: Option<usize>,
+) -> Option<Arc<LuaFunctionType>> {
+    let property_owner_id = infer_expr_property_owner(
+        db,
+        config,
+        call_expr.get_prefix_expr()?,
+        OwnerGuard::default(),
+    )?;
+    match property_owner_id {
+        LuaPropertyOwnerId::Member(member_id) => {
+            let member_index = db.get_member_index();
+            let cur_member = member_index.get_member(&member_id)?;
+            let member_ids = member_index
+                .get_member_by_key(cur_member.get_owner(), cur_member.get_key().clone())?;
+            match member_ids {
+                OneOrMulti::Multi(ids) => {
+                    let mut docfunctions = Vec::new();
+                    for id in ids.iter() {
+                        let member = member_index.get_member(id)?;
+                        if let LuaType::DocFunction(overload_fun) = member.get_decl_type() {
+                            docfunctions.push(overload_fun.clone());
+                        }
+                    }
+                    // dbg!(&docfunctions);
+                    let doc_func = resolve_signature(
+                        db,
+                        config,
+                        docfunctions,
+                        call_expr.clone(),
+                        true,
+                        args_count,
+                    )?;
+                    return Some(doc_func);
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+
+    Some(func)
+}
+
 fn infer_signature_doc_function(
     db: &DbIndex,
     config: &mut LuaInferConfig,
@@ -74,7 +131,8 @@ fn infer_signature_doc_function(
             vec![],
         );
         if signature.is_generic() {
-            fake_doc_function = instantiate_func_generic(db, config, &fake_doc_function, call_expr)?;
+            fake_doc_function =
+                instantiate_func_generic(db, config, &fake_doc_function, call_expr)?;
         }
 
         Some(fake_doc_function.into())

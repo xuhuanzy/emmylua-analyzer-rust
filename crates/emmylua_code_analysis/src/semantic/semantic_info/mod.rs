@@ -2,10 +2,11 @@ mod infer_expr_property_owner;
 mod owner_guard;
 
 use emmylua_parser::{
-    LuaAstNode, LuaAstToken, LuaDocNameType, LuaDocTag, LuaExpr, LuaLocalName, LuaSyntaxKind, LuaSyntaxNode, LuaSyntaxToken, LuaTableField
+    LuaAstNode, LuaAstToken, LuaDocNameType, LuaDocTag, LuaExpr, LuaLocalName, LuaSyntaxKind,
+    LuaSyntaxNode, LuaSyntaxToken, LuaTableField,
 };
-use infer_expr_property_owner::infer_expr_property_owner;
-use owner_guard::OwnerGuard;
+pub use infer_expr_property_owner::infer_expr_property_owner;
+pub use owner_guard::OwnerGuard;
 
 use crate::{DbIndex, LuaDeclExtra, LuaDeclId, LuaMemberId, LuaPropertyOwnerId, LuaType};
 
@@ -68,7 +69,8 @@ pub fn infer_node_semantic_info(
         expr_node if LuaExpr::can_cast(expr_node.kind().into()) => {
             let expr = LuaExpr::cast(expr_node)?;
             let typ = infer_expr(db, infer_config, expr.clone()).unwrap_or(LuaType::Unknown);
-            let property_owner = infer_expr_property_owner(db, infer_config, expr, OwnerGuard::default());
+            let property_owner =
+                infer_expr_property_owner(db, infer_config, expr, OwnerGuard::default());
             Some(SemanticInfo {
                 typ,
                 property_owner,

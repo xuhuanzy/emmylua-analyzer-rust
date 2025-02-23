@@ -138,6 +138,18 @@ fn build_doc_function_type(
                     name.push_str(".");
                 }
             }
+            LuaType::Signature(signature_id) => {
+                // 泛型时会将`Signature`转为`DocFunction`, 因此这里需要处理
+                let signature = db.get_signature_index().get(&signature_id);
+                if let Some(signature) = signature {
+                    if signature.is_colon_define {
+                        type_label = "(method) ";
+                        name.push_str(":");
+                    } else {
+                        name.push_str(".");
+                    }
+                }
+            }
             _ => {}
         }
         if let LuaMemberKey::Name(n) = owner_member.get_key() {

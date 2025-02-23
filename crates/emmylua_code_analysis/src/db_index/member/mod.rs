@@ -129,12 +129,7 @@ impl LuaMemberIndex {
 
     pub fn get_member_by_key(&self, owner: LuaMemberOwner, key: LuaMemberKey) -> Option<OneOrMulti> {
         let map = self.get_member_map(owner)?;
-        for (cur_key, value) in map.iter() {
-            if cur_key == &key {
-                return Some(value.clone());
-            }
-        }
-        None
+        map.get(&key).map(|one_or_multi| one_or_multi.clone())
     }
 }
 

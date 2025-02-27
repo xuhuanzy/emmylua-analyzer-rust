@@ -2,6 +2,7 @@ mod build_hover;
 mod hover_builder;
 mod hover_humanize;
 mod keyword_hover;
+mod std_hover;
 
 pub use build_hover::build_hover_content;
 use build_hover::build_semantic_info_hover;

@@ -4,7 +4,12 @@ use emmylua_code_analysis::{
 use emmylua_parser::{LuaAstNode, LuaCallExpr, LuaSyntaxKind, LuaSyntaxToken};
 use lsp_types::{Hover, HoverContents, MarkedString, MarkupContent};
 
-use super::build_hover::{add_signature_param_description, add_signature_ret_description};
+use crate::handlers::hover::std_hover::{hover_std_description, is_std_by_name};
+
+use super::{
+    build_hover::{add_signature_param_description, add_signature_ret_description},
+    std_hover::is_std_by_path,
+};
 
 #[derive(Debug)]
 pub struct HoverBuilder<'a> {
@@ -76,18 +81,56 @@ impl<'a> HoverBuilder<'a> {
     }
 
     pub fn add_description(&mut self, property_owner: LuaPropertyOwnerId) -> Option<()> {
-        if let Some(property) = self
+        let property = self
             .semantic_model
             .get_db()
             .get_property_index()
-            .get_property(property_owner.clone())
-        {
-            if let Some(detail) = &property.description {
-                self.add_annotation_description(detail.to_string());
-                return Some(());
+            .get_property(property_owner.clone())?;
+
+        let detail = property.description.as_ref()?;
+        let mut description = detail.to_string();
+
+        match property_owner {
+            LuaPropertyOwnerId::Member(id) => {
+                if let Some(member) = self
+                    .semantic_model
+                    .get_db()
+                    .get_member_index()
+                    .get_member(&id)
+                {
+                    if let LuaMemberOwner::Type(ty) = &member.get_owner() {
+                        if is_std_by_name(&ty.get_name()) {
+                            let std_desc = hover_std_description(
+                                ty.get_name(),
+                                member.get_key().get_name(),
+                            );
+                            if !std_desc.is_empty() {
+                                description = std_desc;
+                            }
+                        }
+                    }
+                }
             }
+            LuaPropertyOwnerId::LuaDecl(id) => {
+                if let Some(decl) =
+                    self.semantic_model.get_db().get_decl_index().get_decl(&id)
+                {
+                    if decl.is_global()
+                        && is_std_by_name(&decl.get_name())
+                        && is_std_by_path(self.semantic_model.get_db(), decl.get_file_id()).is_some()
+                    {
+                        let std_desc = hover_std_description(decl.get_name(), None);
+                        if !std_desc.is_empty() {
+                            description = std_desc;
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
-        None
+
+        self.add_annotation_description(description);
+        Some(())
     }
 
     pub fn add_signature_params_rets_description(&mut self, typ: LuaType) {

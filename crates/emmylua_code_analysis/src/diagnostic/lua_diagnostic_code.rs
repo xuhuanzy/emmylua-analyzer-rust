@@ -58,6 +58,12 @@ pub enum DiagnosticCode {
     AwaitInSync,
     /// Doc tag usage error
     AnnotationUsageError,
+    /// Return type mismatch
+    ReturnTypeMismatch,
+    /// Missing return value
+    MissingReturnValue,
+    /// Redundant return value
+    RedundantReturnValue,
 
     #[serde(other)]
     None,

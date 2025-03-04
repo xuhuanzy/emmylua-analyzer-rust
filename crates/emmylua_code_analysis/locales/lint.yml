@@ -100,3 +100,16 @@ tuple member %{idx} not match, expect %{typ}, but got %{got}:
   en: tuple member %{idx} not match, expect %{typ}, but got %{got}
   zh_CN: '元组成员 %{idx} 不匹配，期望 %{typ}，但得到 %{got}'
   zh_HK: '元組成員 %{idx} 不匹配，期望 %{typ}，但得到 %{got}'
+
+Annotations specify that return value %{index} has a type of `%{source}`, returning value of type `%{found}` here instead.:
+  en: Annotations specify that return value %{index} has a type of `%{source}`, returning value of type `%{found}` here instead.
+  zh_CN: '第 %{index} 个返回值的类型为 `%{source}`，但实际返回类型为 `%{found}`。'
+  zh_HK: '第 %{index} 個回傳值的類型為 `%{source}` ，但實際回傳的是 `%{found}`。'
+Annotations specify that at most %{max} return value(s) are required, found %{rmax} returned here instead.:
+  en: 'Annotations specify that at most %{max} return value(s) are required, found %{rmax} returned here instead.'
+  zh_CN: '最多只有 %{max} 个返回值，但此处返回了 %{rmax} 个'
+  zh_HK: '最多只有 %{max} 個回傳值，但此處返回 %{rmax} 個'
+Annotations specify that at least %{min} return value(s) are required, found %{rmin} returned here instead.:
+  en: 'Annotations specify that at least %{min} return value(s) are required, found %{rmin} returned here instead.'
+  zh_CN: '至少需要 %{min} 个返回值，但此处只返回了 %{rmin} 个'
+  zh_HK: '至少需要 %{min} 個回傳值，但此處只返回 %{rmin} 個'

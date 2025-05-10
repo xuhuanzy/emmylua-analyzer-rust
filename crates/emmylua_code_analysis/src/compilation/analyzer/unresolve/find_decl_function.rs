@@ -11,10 +11,32 @@ use crate::{
     infer_expr, instantiate_type_generic,
     semantic::InferGuard,
     InFiled, InferFailReason, LuaInferCache, LuaInstanceType, LuaMemberId, LuaMemberOwner,
-    LuaOperatorOwner, LuaSemanticDeclId, TypeOps, TypeSubstitutor,
+    LuaOperatorOwner, TypeOps, TypeSubstitutor,
 };
 
-pub type FunctionTypeResult = Result<LuaType, InferFailReason>;
+type FunctionTypeResult = Result<LuaType, InferFailReason>;
+
+/// 返回结果为 (类型, 是否是当前类型下的声明)
+pub type FindFunctionResult = Result<(LuaType, bool), InferFailReason>;
+
+struct DeepGuard {
+    deep: usize,
+}
+
+impl DeepGuard {
+    pub fn new() -> Self {
+        Self { deep: 0 }
+    }
+    pub fn next(&mut self) {
+        self.deep += 1;
+    }
+    pub fn get(&self) -> usize {
+        self.deep
+    }
+    pub fn reset(&mut self) {
+        self.deep = 0;
+    }
+}
 
 fn get_member_id(cache: &mut LuaInferCache, index_member_expr: &LuaIndexMemberExpr) -> LuaMemberId {
     let file_id = cache.get_file_id();
@@ -30,40 +52,43 @@ fn get_member_id(cache: &mut LuaInferCache, index_member_expr: &LuaIndexMemberEx
     }
 }
 
-#[allow(unused)]
+/// 寻找声明的函数类型(排除自身), 假设目标具有多个声明, 那么将返回一个联合类型
 pub fn find_decl_function_type(
     db: &DbIndex,
     cache: &mut LuaInferCache,
     prefix_type: &LuaType,
     index_member_expr: LuaIndexMemberExpr,
-) -> FunctionTypeResult {
-    let prefix_expr = index_member_expr
+) -> FindFunctionResult {
+    index_member_expr
         .get_prefix_expr()
         .ok_or(InferFailReason::None)?;
-
+    let mut deep_guard = DeepGuard::new();
     let reason = match find_function_type_by_member_key(
         db,
         cache,
         &prefix_type,
         index_member_expr.clone(),
         &mut InferGuard::new(),
+        &mut deep_guard,
     ) {
         Ok(member_type) => {
-            return Ok(member_type);
+            return Ok((member_type, deep_guard.get() == 0));
         }
         Err(InferFailReason::FieldDotFound) => InferFailReason::FieldDotFound,
         Err(err) => return Err(err),
     };
 
+    deep_guard.reset();
     match find_function_type_by_operator(
         db,
         cache,
         &prefix_type,
         index_member_expr,
         &mut InferGuard::new(),
+        &mut deep_guard,
     ) {
         Ok(member_type) => {
-            return Ok(member_type);
+            return Ok((member_type, deep_guard.get() == 0));
         }
         Err(InferFailReason::FieldDotFound) => {}
         Err(err) => return Err(err),
@@ -78,22 +103,37 @@ fn find_function_type_by_member_key(
     prefix_type: &LuaType,
     index_expr: LuaIndexMemberExpr,
     infer_guard: &mut InferGuard,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     match &prefix_type {
-        LuaType::Ref(decl_id) => {
-            find_custom_type_function_member(db, cache, decl_id.clone(), index_expr, infer_guard)
-        }
-        LuaType::Def(decl_id) => {
-            find_custom_type_function_member(db, cache, decl_id.clone(), index_expr, infer_guard)
-        }
+        LuaType::Ref(decl_id) => find_custom_type_function_member(
+            db,
+            cache,
+            decl_id.clone(),
+            index_expr,
+            infer_guard,
+            deep_guard,
+        ),
+        LuaType::Def(decl_id) => find_custom_type_function_member(
+            db,
+            cache,
+            decl_id.clone(),
+            index_expr,
+            infer_guard,
+            deep_guard,
+        ),
         LuaType::Tuple(tuple_type) => find_tuple_function_member(db, cache, tuple_type, index_expr),
         LuaType::Object(object_type) => {
             find_object_function_member(db, cache, object_type, index_expr)
         }
-        LuaType::Union(union_type) => find_union_function_member(db, cache, union_type, index_expr),
-        LuaType::Generic(generic_type) => find_generic_member(db, cache, generic_type, index_expr),
+        LuaType::Union(union_type) => {
+            find_union_function_member(db, cache, union_type, index_expr, deep_guard)
+        }
+        LuaType::Generic(generic_type) => {
+            find_generic_member(db, cache, generic_type, index_expr, deep_guard)
+        }
         LuaType::Instance(inst) => {
-            find_instance_member_decl_type(db, cache, inst, index_expr, infer_guard)
+            find_instance_member_decl_type(db, cache, inst, index_expr, infer_guard, deep_guard)
         }
         LuaType::Namespace(ns) => infer_namespace_member_decl_type(db, cache, ns, index_expr),
         LuaType::Array(array_type) => find_array_function(db, cache, array_type, index_expr),
@@ -128,6 +168,7 @@ fn find_custom_type_function_member(
     prefix_type_id: LuaTypeDeclId,
     index_expr: LuaIndexMemberExpr,
     infer_guard: &mut InferGuard,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     infer_guard.check(&prefix_type_id)?;
     let type_index = db.get_type_index();
@@ -142,6 +183,7 @@ fn find_custom_type_function_member(
                 &origin_type,
                 index_expr,
                 infer_guard,
+                deep_guard,
             );
         } else {
             return Err(InferFailReason::None);
@@ -152,23 +194,26 @@ fn find_custom_type_function_member(
     let index_key = index_expr.get_index_key().ok_or(InferFailReason::None)?;
     let key = LuaMemberKey::from_index_key(db, cache, &index_key)?;
     if let Some(member_item) = db.get_member_index().get_member_item(&owner, &key) {
-        if let Some(semantic_decl_id) = member_item.resolve_semantic_decl(db) {
-            if let LuaSemanticDeclId::Member(member_id) = semantic_decl_id {
-                let index_member_id = get_member_id(cache, &index_expr);
-                if index_member_id != member_id {
-                    match db.get_type_index().get_type_cache(&member_id.into()) {
-                        Some(type_cache) => return Ok(type_cache.as_type().clone()),
-                        None => {
-                            return Err(InferFailReason::FieldDotFound);
-                        }
+        let index_member_id = get_member_id(cache, &index_expr);
+        let mut result_type = LuaType::Unknown;
+        for member_id in member_item.get_member_ids() {
+            if index_member_id != member_id {
+                match db.get_type_index().get_type_cache(&member_id.into()) {
+                    Some(type_cache) => {
+                        result_type = TypeOps::Union.apply(db, &result_type, &type_cache.as_type());
                     }
+                    None => {}
                 }
             }
+        }
+        if !result_type.is_unknown() {
+            return Ok(result_type);
         }
     }
 
     if type_decl.is_class() {
         if let Some(super_types) = type_index.get_super_types(&prefix_type_id) {
+            deep_guard.next();
             for super_type in super_types {
                 let result = find_function_type_by_member_key(
                     db,
@@ -176,6 +221,7 @@ fn find_custom_type_function_member(
                     &super_type,
                     index_expr.clone(),
                     infer_guard,
+                    deep_guard,
                 );
 
                 match result {
@@ -268,6 +314,7 @@ fn find_union_function_member(
     cache: &mut LuaInferCache,
     union_type: &LuaUnionType,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let mut member_types = Vec::new();
     for sub_type in union_type.get_types() {
@@ -277,6 +324,7 @@ fn find_union_function_member(
             sub_type,
             index_expr.clone(),
             &mut InferGuard::new(),
+            deep_guard,
         );
         match result {
             Ok(typ) => {
@@ -302,6 +350,7 @@ fn index_generic_members_from_super_generics(
     type_decl_id: &LuaTypeDeclId,
     substitutor: &TypeSubstitutor,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> Option<LuaType> {
     let type_index = db.get_type_index();
 
@@ -320,6 +369,7 @@ fn index_generic_members_from_super_generics(
                 &super_type,
                 index_expr.clone(),
                 &mut InferGuard::new(),
+                deep_guard,
             )
             .ok()
         })
@@ -333,6 +383,7 @@ fn find_generic_member(
     cache: &mut LuaInferCache,
     generic_type: &LuaGenericType,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let base_type = generic_type.get_base_type();
 
@@ -345,6 +396,7 @@ fn find_generic_member(
             base_type_decl_id,
             &substitutor,
             index_expr.clone(),
+            deep_guard,
         );
         if let Some(result) = result {
             return Ok(result);
@@ -357,6 +409,7 @@ fn find_generic_member(
         &base_type,
         index_expr,
         &mut InferGuard::new(),
+        deep_guard,
     )?;
 
     Ok(instantiate_type_generic(db, &member_type, &substitutor))
@@ -368,9 +421,17 @@ fn find_instance_member_decl_type(
     inst: &LuaInstanceType,
     index_expr: LuaIndexMemberExpr,
     infer_guard: &mut InferGuard,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let origin_type = inst.get_base();
-    find_function_type_by_member_key(db, cache, &origin_type, index_expr.clone(), infer_guard)
+    find_function_type_by_member_key(
+        db,
+        cache,
+        &origin_type,
+        index_expr.clone(),
+        infer_guard,
+        deep_guard,
+    )
 }
 
 fn find_function_type_by_operator(
@@ -379,31 +440,46 @@ fn find_function_type_by_operator(
     prefix_type: &LuaType,
     index_expr: LuaIndexMemberExpr,
     infer_guard: &mut InferGuard,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     match &prefix_type {
         LuaType::TableConst(in_filed) => {
             find_member_by_index_table(db, cache, in_filed, index_expr)
         }
-        LuaType::Ref(decl_id) => {
-            find_member_by_index_custom_type(db, cache, decl_id, index_expr, infer_guard)
-        }
-        LuaType::Def(decl_id) => {
-            find_member_by_index_custom_type(db, cache, decl_id, index_expr, infer_guard)
-        }
+        LuaType::Ref(decl_id) => find_member_by_index_custom_type(
+            db,
+            cache,
+            decl_id,
+            index_expr,
+            infer_guard,
+            deep_guard,
+        ),
+        LuaType::Def(decl_id) => find_member_by_index_custom_type(
+            db,
+            cache,
+            decl_id,
+            index_expr,
+            infer_guard,
+            deep_guard,
+        ),
         // LuaType::Module(arc) => todo!(),
         LuaType::Array(base) => infer_member_by_index_array(db, cache, base, index_expr),
         LuaType::Object(object) => infer_member_by_index_object(db, cache, object, index_expr),
-        LuaType::Union(union) => find_member_by_index_union(db, cache, union, index_expr),
-        LuaType::Intersection(intersection) => {
-            find_member_by_index_intersection(db, cache, intersection, index_expr)
+        LuaType::Union(union) => {
+            find_member_by_index_union(db, cache, union, index_expr, deep_guard)
         }
-        LuaType::Generic(generic) => find_member_by_index_generic(db, cache, generic, index_expr),
+        LuaType::Intersection(intersection) => {
+            find_member_by_index_intersection(db, cache, intersection, index_expr, deep_guard)
+        }
+        LuaType::Generic(generic) => {
+            find_member_by_index_generic(db, cache, generic, index_expr, deep_guard)
+        }
         LuaType::TableGeneric(table_generic) => {
             find_member_by_index_table_generic(db, cache, table_generic, index_expr)
         }
         LuaType::Instance(inst) => {
             let base = inst.get_base();
-            find_function_type_by_operator(db, cache, &base, index_expr, infer_guard)
+            find_function_type_by_operator(db, cache, &base, index_expr, infer_guard, deep_guard)
         }
         _ => Err(InferFailReason::FieldDotFound),
     }
@@ -487,6 +563,7 @@ fn find_member_by_index_custom_type(
     prefix_type_id: &LuaTypeDeclId,
     index_expr: LuaIndexMemberExpr,
     infer_guard: &mut InferGuard,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     infer_guard.check(&prefix_type_id)?;
     let type_index = db.get_type_index();
@@ -501,6 +578,7 @@ fn find_member_by_index_custom_type(
                 &origin_type,
                 index_expr,
                 infer_guard,
+                deep_guard,
             );
         }
         return Err(InferFailReason::None);
@@ -528,6 +606,7 @@ fn find_member_by_index_custom_type(
     // find member by key in super
     if type_decl.is_class() {
         if let Some(super_types) = type_index.get_super_types(&prefix_type_id) {
+            deep_guard.next();
             for super_type in super_types {
                 let result = find_function_type_by_operator(
                     db,
@@ -535,6 +614,7 @@ fn find_member_by_index_custom_type(
                     &super_type,
                     index_expr.clone(),
                     infer_guard,
+                    deep_guard,
                 );
                 match result {
                     Ok(member_type) => {
@@ -596,6 +676,7 @@ fn find_member_by_index_union(
     cache: &mut LuaInferCache,
     union: &LuaUnionType,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let mut member_type = LuaType::Unknown;
     for member in union.get_types() {
@@ -605,6 +686,7 @@ fn find_member_by_index_union(
             member,
             index_expr.clone(),
             &mut InferGuard::new(),
+            deep_guard,
         );
         match result {
             Ok(typ) => {
@@ -629,6 +711,7 @@ fn find_member_by_index_intersection(
     cache: &mut LuaInferCache,
     intersection: &LuaIntersectionType,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let mut member_type = LuaType::Unknown;
     for member in intersection.get_types() {
@@ -638,6 +721,7 @@ fn find_member_by_index_intersection(
             member,
             index_expr.clone(),
             &mut InferGuard::new(),
+            deep_guard,
         )?;
         if member_type.is_unknown() {
             member_type = sub_member_type;
@@ -658,6 +742,7 @@ fn find_member_by_index_generic(
     cache: &mut LuaInferCache,
     generic: &LuaGenericType,
     index_expr: LuaIndexMemberExpr,
+    deep_guard: &mut DeepGuard,
 ) -> FunctionTypeResult {
     let base_type = generic.get_base_type();
     let type_decl_id = if let LuaType::Ref(id) = base_type {
@@ -679,6 +764,7 @@ fn find_member_by_index_generic(
                 &instantiate_type_generic(db, &origin_type, &substitutor),
                 index_expr.clone(),
                 &mut InferGuard::new(),
+                deep_guard,
             );
         }
         return Err(InferFailReason::None);
@@ -722,6 +808,7 @@ fn find_member_by_index_generic(
                 &instantiate_type_generic(db, &super_type, &substitutor),
                 index_expr.clone(),
                 &mut InferGuard::new(),
+                deep_guard,
             );
             match result {
                 Ok(member_type) => {
